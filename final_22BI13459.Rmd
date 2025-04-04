@@ -1,0 +1,692 @@
+---
+title: 'Understanding Life Expectancy Through Spatial Data Analysis '
+author: "Nguyen Thi Van - 22BI13459"
+date: "17-03-2025"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    code_download: true
+    code_folding: show
+    number_sections: true
+    theme: flatly
+    toc: true
+    toc_float: true
+    dev: svg
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+-   Objectives: using spatial data analysis methods to study the Life Expectancy across various countries, aiming to uncover patterns and disparities between groups of countries.
+
+-   Potential analysis methods: Using Exploratory Data Analysis (Descriptive and Inference Analysis) and Machine Learning for Spatial Prediction.
+
+# Data Description
+
+-   This dataset examines the geographic and socioeconomic factors influencing life ex- pectancy across various countries and years (from 2000 to 2015).
+
+-   Source: Kaggle( [link](https://www.kaggle.com/datasets/saurabhbadole/life-expectancy-based-on-geographic-locations?select=LifeExpectancy.csv) )
+
+-   For spatial attribute (latitude and longitude), these value are merge from a countries coordinates dataset ([link](https://gist.github.com/metal3d/5b925077e66194551df949de64e910f6)) based on Country name
+
+-   Feature descriptions:
+
+    ```{r warning=FALSE}
+        library(knitr)
+    library(kableExtra)
+
+    # Create a data frame with key attributes
+    key_attributes <- data.frame(
+      Feature = c("Country", "Year", "Status", "Longitude", "Latitude", 
+                  "Life expectancy", "Adult Mortality", "Infant deaths", 
+                  "Alcohol", "Percentage expenditure", "Hepatitis B", 
+                  "Measles", "BMI", "Under-five deaths", "Polio", 
+                  "Total expenditure", "Diphtheria", "HIV/AIDS", "GDP", 
+                  "Population", "Thinness 1-19 years", "Thinness 5-9 years", 
+                  "Income composition of resources", "Schooling"),
+      Description = c(
+        "Name of the country",
+        "Year of observation",
+        "Urban or rural status",
+        "Longitude for each country",
+        "Latitude for each country",
+        "Life expectancy at birth in years (average period that a person may expect to live)",
+        "Probability of dying between 15 and 60 years per 1000",
+        "Number of infant deaths per 1000 population",
+        "Alcohol consumption, measured as liters per capita",
+        "Expenditure on health as a percentage of GDP",
+        "Hepatitis B immunization coverage among 1-year-olds (%)",
+        "Number of reported measles cases per 1000 population",
+        "Average Body Mass Index of the population",
+        "Number of deaths under age five per 1000 population",
+        "Polio immunization coverage among 1-year-olds (%)",
+        "Total government health expenditure as a percentage of GDP",
+        "Diphtheria tetanus toxoid and pertussis immunization coverage among 1-year-olds (%)",
+        "Deaths per 1,000 live births due to HIV/AIDS (0-4 years)",
+        "Gross Domestic Product per capita (in USD)",
+        "Population of the country",
+        "Prevalence of thinness among children and adolescents aged 10-19 (%)",
+        "Prevalence of thinness among children aged 5-9 (%)",
+        "Human Development Index in terms of income composition of resources (0 to 1)",
+        "Number of years of schooling"
+      )
+    )
+
+    # Display table
+    kable(key_attributes, col.names = c("Feature", "Description"), caption = "Key Features") %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "bordered"), full_width = FALSE) %>%
+      column_spec(1, bold = TRUE, border_right = TRUE) %>%
+      column_spec(2, width = "60%") %>%
+      row_spec(0, bold = TRUE, background = "#f7f7f7")
+
+
+
+    ```
+
+Load Libraries
+
+```{r warning=FALSE}
+library(tidyverse)
+library(sf)
+library(spdep)
+library(GWmodel)
+library(tmap)
+library(ggplot2)
+library(dplyr)
+```
+
+## Data Preprocessing
+
+-   Checking for missing value within features:
+
+```{r warning=FALSE}
+# Read datasets
+df <- read.csv("LifeExpectancy.csv")
+coordinates <- read.csv("coordinate.csv")
+
+# Merge datasets based on country name
+df <- merge(df, coordinates[, c("name", "latitude", "longitude")], 
+            by.x = "Country", by.y = "name", all.x = TRUE)
+df$ID <- paste(df$Country, df$Year, sep = "_")
+
+# Compute missing value counts and percentages
+na_counts <- colSums(is.na(df[, !names(df) %in% c("ID")]))
+total_counts <- nrow(df)
+na_percentage <- (na_counts / total_counts) * 100  # Convert to percentage
+
+# Convert to data frame for visualization
+na_df <- data.frame(Feature = names(na_counts), NA_Count = na_counts, NA_Percentage = na_percentage)
+pastel_colors <- c("#FBB4AE", "#B3CDE3", "#CCEBC5", "#DECBE4", "#FED9A6", "#FFFFCC", 
+                   "#E5D8BD", "#FDDAEC", "#F2F2F2", "#A6D854", "#66C2A5", "#FC8D62", 
+                   "#8DA0CB", "#E78AC3", "#FFD92F", "#A6CEE3", "#B2DF8A", "#FB9A99", 
+                   "#CAB2D6", "#FFED6F", "#BC80BD", "#80B1D3", "#FFB3B3", "#BEBADA")
+# Plot missing values as a horizontal bar chart with percentage
+ggplot(na_df, aes(x = NA_Percentage, y = reorder(Feature, NA_Percentage), fill = Feature)) +
+  geom_bar(stat = "identity", show.legend = FALSE) + 
+  labs(title = "Missing Values of Features ",
+       x = "Percentage of Missing Values (%)",
+       y = "Feature") +
+  scale_x_continuous(breaks = seq(0, 100, by = 5)) +  # Add x-axis ticks every 5%
+  scale_fill_manual(values = pastel_colors) +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.background = element_rect(fill = "white"),
+    axis.text.y = element_text(size = 10))  # Adjust text size for readability
+
+```
+
+-   Data Cleaning: to avoid error with missing data, we can remove them from the dataset.
+
+Data size before cleaning:
+
+```{r warning=FALSE}
+print(dim(df))
+
+
+```
+
+Data size after cleaning:
+
+```{r warning=FALSE}
+df <- df %>% drop_na()  # Remove NA values
+df$Country <- as.factor(df$Country) # Convert categorical variables
+df$Status <- as.factor(df$Status) 
+print(dim(df))
+```
+
+# Exploratory Data Analysis
+
+-   In this part, we focus on the key feature: Life Expectancy.
+
+-   Methodology: doing descriptive analysis then inference analysis to have an overview understanding about the general trend of this feature –\> Conclusion: which other features can have an effect on Life Expectancy.
+
+### Descriptive Analysis
+
+#### Numerical Summary Measures
+
+-   Using summary statistics to understand the general trends and giving quantitative insight.
+
+    ```{r warning=FALSE}
+    # Load necessary libraries
+    library(dplyr)
+    library(knitr)
+    library(kableExtra)  # For enhanced table formatting
+
+    # Compute summary statistics for Life Expectancy
+    summary_table <- df %>%
+      group_by(Status) %>%
+      summarise(
+        Count = n(),
+        Mean = round(mean(Life.expectancy, na.rm = TRUE), 3),
+        Standard_Deviation = round(sd(Life.expectancy, na.rm = TRUE), 3),
+        Min = min(Life.expectancy, na.rm = TRUE),
+        `Percentile 25%` = round(quantile(Life.expectancy, 0.25, na.rm = TRUE), 3),
+        `Percentile 50%` = round(median(Life.expectancy, na.rm = TRUE), 3),
+        `Percentile 75%` = round(quantile(Life.expectancy, 0.75, na.rm = TRUE), 3),
+        Max = max(Life.expectancy, na.rm = TRUE)
+      ) %>%
+      bind_rows(
+        df %>% summarise(
+          Status = "All Countries",
+          Count = n(),
+          Mean = round(mean(Life.expectancy, na.rm = TRUE), 3),
+          Standard_Deviation = round(sd(Life.expectancy, na.rm = TRUE), 3),
+          Min = min(Life.expectancy, na.rm = TRUE),
+          `Percentile 25%` = round(quantile(Life.expectancy, 0.25, na.rm = TRUE), 3),
+          `Percentile 50%` = round(median(Life.expectancy, na.rm = TRUE), 3),
+          `Percentile 75%` = round(quantile(Life.expectancy, 0.75, na.rm = TRUE), 3),
+          Max = max(Life.expectancy, na.rm = TRUE)
+        )
+      )
+
+    # Transpose the table
+    summary_table_transposed <- as.data.frame(t(summary_table))
+
+    # Rename columns with country status
+    colnames(summary_table_transposed) <- summary_table_transposed[1, ]  # First row as column names
+    summary_table_transposed <- summary_table_transposed[-1, ]  # Remove the first row
+
+    # Print transposed summary table with better styling
+    kable(summary_table_transposed, caption = "Summary Statistics of Life Expectancy") %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = FALSE) %>%
+      column_spec(1, border_right = TRUE, bold = TRUE) %>%  # Add vertical border and bold first column
+      row_spec(0, bold = TRUE)  # Bold header row
+
+
+
+    ```
+
+-   For other features:
+
+```{r warning=FALSE}
+summary(df)
+```
+
+#### Graphical Summary
+
+-   Histogram for Life Expectancy distribution: l
+
+    -   Left-skewed: the left tail extends towards 40-50 years, the right tail extends to 85-90 years.
+
+    -   Bimodal pattern: slightly dip before the highest peak –\> One group with high life expectancy (70-80 years) and lower life expectancy (50-60 years)
+
+```{r warning=FALSE}
+ggplot(df, aes(x = Life.expectancy)) +
+  geom_histogram(aes(y=after_stat(density)),binwidth = 2, fill = "#6A8CAF", color = "white", alpha = 0.8) +  
+  geom_density(color = "blue", size = 0.5)+
+  labs(title = "Distribution of Life Expectancy", x = "Life Expectancy (Years) ", y = "Count") +
+  theme_minimal() +  
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = "white"),
+        plot.title = element_text(hjust = 0.5))
+
+```
+
+-   Box plot of Life Expectancy between group of countries:
+
+    -   Developed countries: higher, less variability
+
+    -   Developing countries: lower, more variability
+
+```{r warning=FALSE}
+# Life expectancy between developed and developing country
+ggplot(df, aes(x = Status, y = Life.expectancy, fill = Status)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 16, outlier.size = 2, whiskerwidth = 1 ) + 
+  scale_fill_manual(values = c("Developed" = "#AEC6CF", "Developing" = "#FFDAC1")) + 
+  labs(title = "Life Expectancy in Developed vs. Developing Countries",
+       x = "Status",
+       y = "Life Expectancy",
+       fill = "Country Status") +  # Legend title
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 9),
+        legend.position = "none")
+```
+
+```{r warning=FALSE}
+# Filter data for developing countries
+df_developing <- df[df$Status == "Developing", ]
+
+# Plot histogram
+ggplot(df_developing, aes(x = Life.expectancy)) +
+  geom_histogram(binwidth = 2, fill = "#FFDAC1", color = "black", alpha = 0.7) +
+  labs(title = "Histogram of Life Expectancy in Developing Countries",
+       x = "Life Expectancy (Years)",
+       y = "Frequency") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+```
+
+-   Outlier analysis:
+
+```{r}
+developed_countries <- df[df$Status == "Developing"& df$Life.expectancy<50,]
+id_list <- developed_countries$ID
+
+
+```
+
+```{r}
+library(ggplot2)
+library(reshape2)
+
+# Columns to compare
+columns_to_plot <- c(
+  "percentage.expenditure", "Total.expenditure", 
+  "GDP", "Income.composition.of.resources", 
+  "Schooling", "Alcohol"
+)
+
+# Subset data for id_list and the rest of the data
+developed_data <- df[df$ID %in% id_list, columns_to_plot]
+other_data <- df[!df$ID %in% id_list, columns_to_plot]
+
+# Create a new column to indicate the groups (id_list vs. rest of the data)
+developed_data$Group <- "Outlier"
+other_data$Group <- "Normal"
+
+# Combine both datasets
+combined_data <- rbind(developed_data, other_data)
+
+# Reshape the data for plotting
+combined_data_melted <- melt(combined_data, id.vars = "Group", 
+                             variable.name = "Feature", value.name = "Value")
+
+# Custom subplot names
+feature_names <- c(
+  "percentage.expenditure" = "Health Expenditure (%)",
+  "Total.expenditure" = "Total Expenditure (%)",
+  "GDP" = "GDP",
+  "Income.composition.of.resources" = "Income Composition",
+  "Schooling" = "Years of Schooling",
+  "Alcohol" = "Alcohol Consumption"
+)
+
+# Create the box plots
+ggplot(combined_data_melted, aes(x = Group, y = Value, fill = Group)) +
+  geom_boxplot(outlier.size = 0.8, width = 0.3) +  # Smaller boxplots
+  facet_wrap(~ Feature, scales = "free_y", ncol = 3, labeller = as_labeller(feature_names)) +  
+  scale_fill_manual(values = c("Outlier" = "#FBB4AE", "Normal" = "#B3CDE3")) +  # Pastel colors
+  labs(title = "Comparison of Selected Features between Outliers and Normal group",
+       x="",
+       y = "Value") +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        axis.text.x = element_text(size = 8),  # Smaller x-axis labels
+        axis.text.y = element_text(size = 7),  # Smaller y-axis labels
+        strip.text = element_text(size = 10),  # Smaller subplot titles
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        panel.spacing = unit(1, "lines"))  
+
+
+```
+
+-   Correlation matrix: to have a first overview about linear relationship between variables
+
+```{r fig.width=10, fig.height=10 }
+library(corrplot)
+
+# Select only numeric columns (Base R)
+numeric_cols <- sapply(df, is.numeric)  # Identify numeric columns
+corr_matrix <- cor(df[, numeric_cols], use = "complete.obs")  # Compute correlation
+
+# Plot the correlation matrix
+corrplot(corr_matrix, tl.col = "darkblue", tl.srt = 45, method = "color")
+
+# Add title
+title("Correlation Matrix of Features", col.main = "black", font.main = 2, cex.main = 1.5)
+```
+
+### Inference Analysis
+
+#### Pearson Correlation Analysis
+
+-   Goals: Quantify how strong these features related together in a linear relationship.
+
+-   In this report, we chose 4 features which have a positive effect on Life Expectancy: GDP, Total Expenditure, Income Composition of Resources and Schooling.
+
+    ```{r warning=FALSE}
+    library(knitr)
+
+    # Compute correlations
+    correlations <- data.frame(
+      Variable = c("GDP", "Total Expenditure", "Income Composition of Resources", "Schooling"),
+      Pearson_Correlation = c(
+        cor(df$Life.expectancy, df$GDP, use = "complete.obs", method = "pearson"),
+        cor(df$Life.expectancy, df$Total.expenditure, use = "complete.obs", method = "pearson"),
+        cor(df$Life.expectancy, df$Income.composition.of.resources, use = "complete.obs", method = "pearson"),
+        cor(df$Life.expectancy, df$Schooling, use = "complete.obs", method = "pearson")
+      )
+    )
+
+    # Display table
+    kable(correlations, col.names = c("Variable", "Pearson Correlation"), caption = "Correlation with Life Expectancy")
+
+
+    ```
+
+The result shows that:
+
+-   Moderate positive correlation between Life expectancy and GDP = higher GDP is generally associated with longer life expectancy.
+
+-   Weak positive correlation between Life Expectancy and Total Expenditure = government health spending has a small effect. This might be because factors like efficiency of spending matter more.
+
+-   Strong positive correlation between Life Expectancy and Income Composition of Resources = a country’s economic equality (human development factors like education, income distribution) has a significant effect on life expectancy.
+
+#### Multiple linear regression model
+
+-   Using p-value will help us in exclude variables that do not contribute significantly and focus on the most important predictors
+
+```{r warning=FALSE}
+df$Income.composition.norm <- scale(df$Income.composition.of.resources)
+model <- lm(Life.expectancy ~ GDP + Total.expenditure + Income.composition.norm + Schooling, data = df)
+summary(model)
+```
+
+The result show that:
+
+-   Multiple R-squared = 0.6017: the model explains 60.17% of the variance in life expectancy
+
+-   F-statistic = 603.1, p \< 2.2e-16: the model is highly significant, meaning at least one predictor strongly affects life expectancy.
+
+-   p-value: GDP and Income composition are significant effect in life expectancy (p-value \<0.001). Especially Income composition with 1 unit increase in the variable results in a 3.3-year increase in life expectancy. On the other hand, Total expenditure has no significant effect on life expectancy at 5% level (p-value \> 0.05)
+
+**Relationship between features**
+
+```{r fig.width=10, fig.height=10}
+# Load necessary library
+library(ggplot2)
+
+# Define custom pastel colors
+point_color <- "#56B4E9"  # Pastel blue for points
+line_color <- "#E69F00"   # Pastel orange for regression line
+fill_color <- "#E69F00"   # Light pastel orange for confidence interval
+
+# GDP vs. Life Expectancy (Linear Regression)
+p1 <- ggplot(df, aes(x = GDP, y = Life.expectancy)) +
+  geom_point(alpha = 0.5, color = point_color) +  # Transparent pastel blue points
+  geom_smooth(method = "lm", color = line_color, fill = fill_color, alpha = 0.3) +  # Regression line with shading
+  labs(title = "GDP vs. Life Expectancy",
+       x = "GDP per Capita",
+       y = "Life Expectancy") +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 13),
+        legend.position = "none")
+
+# Total Expenditure vs. Life Expectancy (Linear Regression)
+p2 <- ggplot(df, aes(x = Total.expenditure, y = Life.expectancy)) +
+  geom_point(alpha = 0.5, color = point_color) +
+  geom_smooth(method = "lm", color = line_color, fill = fill_color, alpha = 0.3) +
+  labs(title = "Healthcare Expenditure vs. Life Expectancy",
+       x = "Total Healthcare Expenditure",
+       y = "Life Expectancy") +
+  theme_minimal() + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 13),
+        legend.position = "none")
+
+# Income Composition of Resources vs. Life Expectancy (Linear Regression)
+p3 <- ggplot(df, aes(x = Income.composition.norm, y = Life.expectancy)) +
+  geom_point(alpha = 0.5, color = point_color) +
+  geom_smooth(method = "lm", color = line_color, fill = fill_color, alpha = 0.3) +
+  labs(title = "Income Composition vs. Life Expectancy",
+       x = "Income Composition of Resources",
+       y = "Life Expectancy") +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 13),
+        legend.position = "none")
+# Schooling vs. Life Expectancy (Linear Regression)
+p4 <- ggplot(df, aes(x = Schooling, y = Life.expectancy)) +
+  geom_point(alpha = 0.5, color = point_color) +
+  geom_smooth(method = "lm", color = line_color, fill = fill_color, alpha = 0.3) +
+  labs(title = "Schooling vs. Life Expectancy",
+       x = "Schooling",
+       y = "Life Expectancy") +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 13),
+        legend.position = "none")
+
+# Display plots together
+library(gridExtra)
+grid.arrange(p1, p2, p3,p4, ncol = 1)  # Arrange plots in a single row
+```
+
+### Perform Spatial Clustering with Moran’s I Test
+
+-   Moran’s I statistic measures how similar neighboring observations are.
+
+-   Result interpretation:
+
+    -   **p-value \< 0.001** → **Statistically significant**, meaning life expectancy is **not randomly distributed** but follows a spatial pattern
+
+    -   **Moran’s I = 0.921** → Strong **positive spatial autocorrelation** (high/low life expectancy regions cluster together).
+
+```{r warning=FALSE}
+library(leaflet)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(spdep)  # For spatial clustering
+library(dplyr)
+# Convert dataframe to an sf spatial object
+df_sf <- st_as_sf(df, coords = c("longitude", "latitude"), crs = 4326)
+
+# Slightly jitter coordinates to avoid identical points issue
+set.seed(42)
+df_sf$geometry <- st_jitter(df_sf$geometry, amount = 1e-5)
+
+# Load world map data
+world <- ne_countries(scale = "medium", returnclass = "sf")  # Keep separate!
+
+# Define color palette based on Life Expectancy
+pal <- colorNumeric(palette = "viridis", domain = df_sf$Life.expectancy)
+
+# Create spatial neighbors using k-nearest neighbors
+coords <- st_coordinates(df_sf)
+neighbors <- knearneigh(coords, k = 5)
+nb <- knn2nb(neighbors)
+
+# Convert to spatial weights
+weights <- nb2listw(nb, style = "W")
+
+# Compute Moran's I test for spatial clustering
+morans_test <- moran.test(df_sf$Life.expectancy, listw = weights)
+
+print(morans_test)  # Check p-value to confirm clustering
+
+
+```
+
+-   Interactive Spatial Mapping: we can see clearly the cluster of country with high and low life expectancy
+
+```{r warning=FALSE}
+# Create an interactive leaflet map
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%  # Add basemap
+
+  # Add world map as a background layer (optional)
+  addPolygons(data = world, fillOpacity = 0.1, color = "gray", weight = 1) %>%
+
+  # Add life expectancy points
+  addCircleMarkers(
+    data = df_sf,
+    radius = 5,
+    color = ~pal(Life.expectancy),
+    stroke = FALSE,
+    fillOpacity = 0.8,
+    popup = ~paste0("Country: ", Country, "<br>",
+                    "Life Expectancy: ", round(Life.expectancy, 2))
+  ) %>%
+
+  # Add legend
+  addLegend(
+    "bottomright",
+    pal = pal,
+    values = df_sf$Life.expectancy,
+    title = "Life Expectancy",
+    opacity = 1
+  ) %>%
+  addScaleBar(position = "bottomleft")
+```
+
+# Machine Learning for Spatial Prediction
+
+-   Goals: to predict high-risk regions (regions where life expectancy is in the bottom 25%) based on geographical and socioeconomic information. This is framed as a binary classification problem, where:
+
+    -   1 = high-risk region (low life expectancy).
+
+    -   0 = low-risk region (higher life expectancy).
+
+-   Methodology: Using Random Forest model which can handles non-linear relationships data. Since life expectancy can have non-linear dependencies on other features.
+
+-   Evaluation: using ROC curve
+
+```{r warning=FALSE}
+library(caret)           # Machine learning utilities
+library(randomForest)    # Random Forest model
+library(ggplot2)         # Visualization
+library(sf)              # Spatial data handling
+library(dplyr)           # Data manipulation
+
+# Define High-Risk Regions (Bottom 25% Life Expectancy)
+threshold <- quantile(df$Life.expectancy, 0.25, na.rm = TRUE) 
+df$HighRisk <- ifelse(df$Life.expectancy < threshold, 1, 0) 
+
+# Ensure HighRisk is a Factor
+df$HighRisk <- factor(df$HighRisk, levels = c(0, 1))
+
+# Select Features for Prediction
+df_ml <- subset(df, select = c(HighRisk, GDP, percentage.expenditure, Population, Schooling, Income.composition.of.resources, latitude, longitude))
+
+
+# Train-Test Split (80% Train, 20% Test)
+set.seed(42)
+trainIndex <- createDataPartition(df_ml$HighRisk, p = 0.8, list = FALSE)
+trainData <- df_ml[trainIndex, ]
+testData <- df_ml[-trainIndex, ]
+
+# Train Random Forest Model
+rf_model <- randomForest(HighRisk ~ ., data = trainData, ntree = 500, mtry = 3, importance = TRUE)
+
+# Model Evaluation on Test Data
+predictions <- predict(rf_model, testData)
+
+# Ensure predictions and test labels have same factor levels
+testData$HighRisk <- factor(testData$HighRisk, levels = c(0, 1))
+predictions <- factor(predictions, levels = c(0, 1))
+
+# Compute Confusion Matrix
+conf_matrix <- confusionMatrix(predictions, testData$HighRisk)
+print(conf_matrix)  # Accuracy, Precision, Recall
+
+# Feature Importance
+importance(rf_model)
+varImpPlot(rf_model)
+
+# Check if both classes are predicted
+table(predictions)
+table(testData$HighRisk)
+
+# Visualization: Map of Predicted High-Risk Regions
+df_sf <- st_as_sf(df, coords = c("longitude", "latitude"), crs = 4326) # Convert to Spatial Object
+df_sf$Predicted_Risk <- predict(rf_model, df_ml)
+
+
+```
+
+```{r warning=FALSE}
+cm <- conf_matrix$table
+# True Positives (TP), False Negatives (FN), False Positives (FP), and True Negatives (TN)
+TP <- cm[2, 2]  # High-Risk correctly predicted as High-Risk
+FN <- cm[1, 2]  # Non-High-Risk incorrectly predicted as High-Risk
+FP <- cm[2, 1]  # High-Risk incorrectly predicted as Non-High-Risk
+TN <- cm[1, 1]  # Non-High-Risk correctly predicted as Non-High-Risk
+
+# True Positive Rate (TPR) and False Positive Rate (FPR)
+TPR <- TP / (TP + FN)  # True Positive Rate
+FPR <- FP / (FP + TN)  # False Positive Rate
+
+# Print TPR and FPR
+cat("True Positive Rate (TPR):", TPR, "\n")
+cat("False Positive Rate (FPR):", FPR, "\n")
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = df_sf, aes(color = as.factor(Predicted_Risk))) +
+  scale_color_manual(values = c("#B3CDE3", "#FFB3BA"), labels = c("Low-Risk","High-Risk")) +
+  labs(title = "Predicted High-Risk Regions", color = "Risk Level") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"), 
+
+  )
+```
+
+```{r warning=FALSE}
+library(pROC)  
+pred_probs <- predict(rf_model, testData, type = "prob")[,2]  # Probabilities for High-Risk class (1)
+
+# Compute ROC Curve
+roc_obj <- roc(testData$HighRisk, pred_probs)
+
+# Plot ROC Curve
+ggplot(data = data.frame(TPR = roc_obj$sensitivities, 
+                         FPR = 1 - roc_obj$specificities)) +
+  geom_line(aes(x = FPR, y = TPR), color = "#CDB7F6", size = 1) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey") +
+  labs(title = paste("ROC Curve"),
+       x = "False Positive Rate ",
+       y = "True Positive Rate ") +
+  theme_minimal()
+```
+
+Result interpretation:
+
+-   The ROC curve stay away from the random line model –\> good classification model.
+
+# Conclusion
+
+-   Having an overview about Life Expectancy between various region and which factor can impact it, using multiples Exploratory Data Analysis Method and Spatial Analysis Method.
+
+-   Adapting a machine learning model to building a classifier for high-risk region, using geographical and socioeconomic features. These model can be helpful in determining strategy for improving Life expectancy within countries.
